@@ -166,9 +166,9 @@ module stream_skid_buffer #(
                         slotA_keep <= s_keep;
                         slotA_last <= s_last;
                         slotA_user <= s_user;
-                    end else if (s_accept && !m_accept) begin
-                        // Pushing to skid; slotA stays, slotB loaded separately
                     end
+                    // s_accept && !m_accept: slotA is unchanged; slotB is
+                    // loaded separately in the slot B always_ff block.
                 end
                 TWO: begin
                     if (m_accept) begin

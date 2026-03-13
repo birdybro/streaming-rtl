@@ -89,6 +89,8 @@ module stream_fifo #(
 
     localparam int ADDR_W  = $clog2(DEPTH);
     localparam int ENTRY_W = DATA_WIDTH + KEEP_WIDTH + 1 + USER_WIDTH;
+    localparam logic [ADDR_W:0] DEPTH_W  = DEPTH[ADDR_W:0];
+    localparam logic [ADDR_W:0] DEPTH_M1 = DEPTH[ADDR_W:0] - 1'b1;
 
     // -------------------------------------------------------------------------
     // Memory array
@@ -105,7 +107,7 @@ module stream_fifo #(
     logic fifo_full;
     logic fifo_empty;
 
-    assign fifo_full  = (fifo_count == DEPTH[ADDR_W:0]);
+    assign fifo_full  = (fifo_count == DEPTH_W);
     assign fifo_empty = (fifo_count == '0);
 
     // -------------------------------------------------------------------------
@@ -180,7 +182,7 @@ module stream_fifo #(
     assign s_ready      = ~fifo_full;
     assign full         = fifo_full;
     assign empty        = fifo_empty & ~out_valid;
-    assign almost_full  = (fifo_count >= (DEPTH[ADDR_W:0] - 1'b1));
+    assign almost_full  = (fifo_count >= DEPTH_M1);
     assign almost_empty = (fifo_count <= 1'b1);
     assign count        = fifo_count;
 

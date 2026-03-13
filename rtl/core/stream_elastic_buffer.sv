@@ -80,8 +80,10 @@ module stream_elastic_buffer #(
     end
     // synthesis translate_on
 
-    localparam int ADDR_W  = $clog2(DEPTH);
-    localparam int ENTRY_W = DATA_WIDTH + KEEP_WIDTH + 1 + USER_WIDTH;
+    localparam int ADDR_W    = $clog2(DEPTH);
+    localparam int ENTRY_W   = DATA_WIDTH + KEEP_WIDTH + 1 + USER_WIDTH;
+    localparam logic [ADDR_W:0] DEPTH_W  = DEPTH[ADDR_W:0];   // width-matched depth
+    localparam logic [ADDR_W:0] DEPTH_M1 = DEPTH[ADDR_W:0] - 1'b1; // depth minus 1
 
     // -------------------------------------------------------------------------
     // FIFO storage
@@ -98,7 +100,7 @@ module stream_elastic_buffer #(
     logic fifo_full;
     logic fifo_empty;
 
-    assign fifo_full  = (count == DEPTH[ADDR_W:0]);
+    assign fifo_full  = (count == DEPTH_W);
     assign fifo_empty = (count == '0);
 
     // -------------------------------------------------------------------------
@@ -170,7 +172,7 @@ module stream_elastic_buffer #(
     // Status and output assignments
     // -------------------------------------------------------------------------
     assign s_ready      = ~fifo_full;
-    assign almost_full  = (count >= (DEPTH[ADDR_W:0] - 1'b1));
+    assign almost_full  = (count >= DEPTH_M1);
     assign almost_empty = (count <= 1'b1);
 
     assign m_valid = out_valid;
