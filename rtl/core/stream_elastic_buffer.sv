@@ -1,0 +1,184 @@
+// =============================================================================
+// Module:      stream_elastic_buffer
+// Description: A parameterizable elastic buffer backed by a synchronous
+//              circular FIFO. Decouples upstream and downstream stream
+//              interfaces, absorbing bursts up to DEPTH entries deep.
+//              Provides almost_full and almost_empty flags for flow-control
+//              lookahead. Read data is registered (one cycle read latency).
+//
+//              DEPTH must be a power of 2 to allow natural pointer wrap-around
+//              using truncated addition.
+//
+// Parameters:
+//   DATA_WIDTH   - Width of data payload in bits         (default: 8)
+//   DEPTH        - Number of entries; must be power of 2 (default: 16)
+//   USER_WIDTH   - Width of sideband user signal         (default: 1)
+//   KEEP_WIDTH   - Number of byte-enable keep bits       (default: DATA_WIDTH/8)
+//
+// Ports:
+//   clk          - Clock
+//   rst_n        - Active-low synchronous reset
+//   s_valid      - Upstream valid
+//   s_ready      - Upstream ready (asserted when not full)
+//   s_data       - Upstream data
+//   s_keep       - Upstream byte enables
+//   s_last       - Upstream packet end indicator
+//   s_user       - Upstream sideband data
+//   m_valid      - Downstream valid (asserted when output register holds data)
+//   m_ready      - Downstream ready
+//   m_data       - Downstream data (registered)
+//   m_keep       - Downstream byte enables (registered)
+//   m_last       - Downstream packet end (registered)
+//   m_user       - Downstream sideband data (registered)
+//   almost_full  - Asserted when occupancy >= DEPTH-1
+//   almost_empty - Asserted when occupancy <= 1
+//
+// Latency:       1 cycle (registered read port)
+// Throughput:    1 transfer/cycle (full throughput)
+// Backpressure:  s_ready deasserts when FIFO is full
+// Limitations:   Single-clock domain; DEPTH must be power of 2 >= 2
+// =============================================================================
+
+module stream_elastic_buffer #(
+    parameter int DATA_WIDTH = 8,
+    parameter int DEPTH      = 16,
+    parameter int USER_WIDTH = 1,
+    parameter int KEEP_WIDTH = DATA_WIDTH / 8
+) (
+    input  logic                    clk,
+    input  logic                    rst_n,
+
+    // Upstream (slave) interface
+    input  logic                    s_valid,
+    output logic                    s_ready,
+    input  logic [DATA_WIDTH-1:0]   s_data,
+    input  logic [KEEP_WIDTH-1:0]   s_keep,
+    input  logic                    s_last,
+    input  logic [USER_WIDTH-1:0]   s_user,
+
+    // Downstream (master) interface
+    output logic                    m_valid,
+    input  logic                    m_ready,
+    output logic [DATA_WIDTH-1:0]   m_data,
+    output logic [KEEP_WIDTH-1:0]   m_keep,
+    output logic                    m_last,
+    output logic [USER_WIDTH-1:0]   m_user,
+
+    // Status flags
+    output logic                    almost_full,
+    output logic                    almost_empty
+);
+
+    // -------------------------------------------------------------------------
+    // Parameter validation (simulation only)
+    // -------------------------------------------------------------------------
+    // synthesis translate_off
+    initial begin
+        if (DEPTH < 2 || (DEPTH & (DEPTH - 1)) != 0) begin
+            $fatal(1, "stream_elastic_buffer: DEPTH must be a power of 2 >= 2, got %0d", DEPTH);
+        end
+    end
+    // synthesis translate_on
+
+    localparam int ADDR_W    = $clog2(DEPTH);
+    localparam int ENTRY_W   = DATA_WIDTH + KEEP_WIDTH + 1 + USER_WIDTH;
+    localparam logic [ADDR_W:0] DEPTH_W  = DEPTH[ADDR_W:0];   // width-matched depth
+    localparam logic [ADDR_W:0] DEPTH_M1 = DEPTH[ADDR_W:0] - 1'b1; // depth minus 1
+
+    // -------------------------------------------------------------------------
+    // FIFO storage
+    // -------------------------------------------------------------------------
+    logic [ENTRY_W-1:0] mem [0:DEPTH-1];
+
+    // -------------------------------------------------------------------------
+    // Write / read pointers and occupancy counter
+    // -------------------------------------------------------------------------
+    logic [ADDR_W-1:0] wr_ptr;
+    logic [ADDR_W-1:0] rd_ptr;
+    logic [ADDR_W:0]   count;     // extra bit: count == DEPTH means full
+
+    logic fifo_full;
+    logic fifo_empty;
+
+    assign fifo_full  = (count == DEPTH_W);
+    assign fifo_empty = (count == '0);
+
+    // -------------------------------------------------------------------------
+    // Registered output stage: one register between FIFO and master port
+    // -------------------------------------------------------------------------
+    logic                  out_valid;
+    logic [DATA_WIDTH-1:0] out_data;
+    logic [KEEP_WIDTH-1:0] out_keep;
+    logic                  out_last;
+    logic [USER_WIDTH-1:0] out_user;
+
+    // Load the output register from FIFO when output is empty or being consumed
+    logic fifo_rd;
+    assign fifo_rd = ~fifo_empty & (~out_valid | m_ready);
+
+    // -------------------------------------------------------------------------
+    // Write port
+    // -------------------------------------------------------------------------
+    logic fifo_wr;
+    assign fifo_wr = s_valid & ~fifo_full;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            wr_ptr <= '0;
+        end else if (fifo_wr) begin
+            mem[wr_ptr] <= {s_data, s_keep, s_last, s_user};
+            wr_ptr      <= wr_ptr + 1'b1;
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Read port
+    // -------------------------------------------------------------------------
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            rd_ptr    <= '0;
+            out_valid <= 1'b0;
+            out_data  <= '0;
+            out_keep  <= '0;
+            out_last  <= 1'b0;
+            out_user  <= '0;
+        end else begin
+            if (fifo_rd) begin
+                rd_ptr    <= rd_ptr + 1'b1;
+                out_valid <= 1'b1;
+                {out_data, out_keep, out_last, out_user} <= mem[rd_ptr];
+            end else if (m_ready && out_valid) begin
+                out_valid <= 1'b0;
+            end
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Occupancy counter
+    // -------------------------------------------------------------------------
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            count <= '0;
+        end else begin
+            unique case ({fifo_wr, fifo_rd})
+                2'b10:   count <= count + 1'b1;
+                2'b01:   count <= count - 1'b1;
+                default: count <= count;
+            endcase
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Status and output assignments
+    // -------------------------------------------------------------------------
+    assign s_ready      = ~fifo_full;
+    assign almost_full  = (count >= DEPTH_M1);
+    assign almost_empty = (count <= 1'b1);
+
+    assign m_valid = out_valid;
+    assign m_data  = out_data;
+    assign m_keep  = out_keep;
+    assign m_last  = out_last;
+    assign m_user  = out_user;
+
+endmodule
